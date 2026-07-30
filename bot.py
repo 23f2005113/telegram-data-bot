@@ -38,9 +38,17 @@ fetch_page tool to read their actual content - do not guess or make up numbers.
 
 The question itself will specify exactly what shape the answer must take
 (e.g. a state name, a number, a list, etc.) usually with a phrase like
-'reply with ONLY ...'. Once you have computed the real answer, output ONLY that value -
-no explanation, no extra words, no markdown, no surrounding JSON. Just the raw value,
-shaped exactly as the question asked for it."""
+'reply with ONLY ...'. It may even show you a JSON template like {"answer": "<city>"} -
+that template is just showing you the SHAPE of the value, not something to reproduce.
+
+Once you have computed the real answer, output ONLY the raw value itself -
+no explanation, no extra words, no markdown, and critically: NO surrounding JSON,
+NO curly braces, NO "answer" key of your own. If the question shows {"answer": "<city>"}
+and the city is Paris, you output exactly: Paris
+(not {"answer": "Paris"}, not "Paris" with quotes - just: Paris)
+
+A separate system will wrap your raw value into the final JSON envelope, so never
+do that wrapping yourself."""
 
 
 def web_search(query: str) -> str:
