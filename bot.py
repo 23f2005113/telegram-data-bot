@@ -3,41 +3,78 @@ import json
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
+import requests
+from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS
+import google.generativeai as genai
+
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, FileResponse
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-import anthropic
-
 # ---- Config (set these as environment variables on your host) ----
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 PUBLIC_HOST = os.environ["PUBLIC_HOST"]  # e.g. https://your-app.onrender.com (no trailing slash)
-MODEL_NAME = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
 
 LOG_PATH = "run.jsonl"
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# Very simple in-memory per-chat conversation history.
+# Very simple in-memory per-chat session store.
 # Good enough for short multi-turn question sequences during grading.
-conversations: dict[int, list] = {}
+sessions: dict[int, "genai.ChatSession"] = {}
 
 SYSTEM_PROMPT = """You are a data analyst agent talking to a user over Telegram.
 You will receive one or more messages building up a data-analysis question.
 Only the LAST message is the actual question you must answer; earlier messages are context.
 
 The question may reference a public dataset (e.g. MOSPI, data.gov.in, or similar open
-government/public data sources). Use the web_search tool to find and read the actual
-data you need - do not guess or make up numbers.
+government/public data sources). Use the web_search tool to find relevant pages, and the
+fetch_page tool to read their actual content - do not guess or make up numbers.
 
 The question itself will specify exactly what shape the answer must take
 (e.g. a state name, a number, a list, etc.) usually with a phrase like
 'reply with ONLY ...'. Once you have computed the real answer, output ONLY that value -
 no explanation, no extra words, no markdown, no surrounding JSON. Just the raw value,
 shaped exactly as the question asked for it."""
+
+
+def web_search(query: str) -> str:
+    """Search the web for a query and return top result titles, URLs, and snippets as JSON."""
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+        return json.dumps(results)
+    except Exception as e:
+        return f"search error: {e}"
+
+
+def fetch_page(url: str) -> str:
+    """Fetch a webpage by URL and return its visible text content (truncated to 6000 chars)."""
+    try:
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        text = " ".join(soup.get_text(separator=" ").split())
+        return text[:6000]
+    except Exception as e:
+        return f"fetch error: {e}"
+
+
+def get_session(chat_id: int):
+    if chat_id not in sessions:
+        model = genai.GenerativeModel(
+            model_name=MODEL_NAME,
+            system_instruction=SYSTEM_PROMPT,
+            tools=[web_search, fetch_page],
+        )
+        sessions[chat_id] = model.start_chat(enable_automatic_function_calling=True)
+    return sessions[chat_id]
 
 
 def append_log(entry: dict) -> None:
@@ -47,23 +84,9 @@ def append_log(entry: dict) -> None:
 
 
 async def compute_answer(chat_id: int, question: str) -> str:
-    history = conversations.setdefault(chat_id, [])
-    history.append({"role": "user", "content": question})
-
-    response = client.messages.create(
-        model=MODEL_NAME,
-        max_tokens=1500,
-        system=SYSTEM_PROMPT,
-        messages=history,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-    )
-
-    answer_text = "".join(
-        block.text for block in response.content if block.type == "text"
-    ).strip()
-
-    history.append({"role": "assistant", "content": answer_text})
-    return answer_text
+    chat = get_session(chat_id)
+    response = chat.send_message(question)
+    return response.text.strip()
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
